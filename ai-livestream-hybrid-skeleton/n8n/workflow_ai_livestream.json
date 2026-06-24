@@ -1,0 +1,159 @@
+{
+  "name": "AI Livestream Hybrid - Webhook to Python",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "ai-livestream-comment",
+        "httpMethod": "POST",
+        "responseMode": "responseNode"
+      },
+      "id": "Webhook_Comment",
+      "name": "Webhook - Incoming Comment",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\nconst comment = (body.comment || body.text || '').trim();\nconst sourceUser = body.user || body.source_user || 'anonymous';\nconst requestId = body.request_id || crypto.randomUUID();\n\nif (!comment) {\n  return [{ json: { skip: true, reason: 'empty_comment', request_id: requestId } }];\n}\n\nconst spamPatterns = [/http/i, /casino/i, /telegram/i];\nconst isSpam = spamPatterns.some(r => r.test(comment));\n\nreturn [{\n  json: {\n    skip: isSpam,\n    reason: isSpam ? 'spam_pattern' : '',\n    comment,\n    source_user: sourceUser,\n    request_id: requestId\n  }\n}];"
+      },
+      "id": "Normalize_Filter",
+      "name": "Normalize + Basic Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        250,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.skip}}",
+              "operation": "isTrue"
+            }
+          ]
+        }
+      },
+      "id": "IF_Skip",
+      "name": "Skip?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'skipped', reason: $json.reason, request_id: $json.request_id } }}"
+      },
+      "id": "Respond_Skipped",
+      "name": "Respond Skipped",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        750,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://127.0.0.1:8088/speak",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { reply: 'Demo reply: ' + $json.comment, emotion: 'happy', action: 'answer', source_user: $json.source_user, comment: $json.comment, request_id: $json.request_id } }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "HTTP_Python_Speak",
+      "name": "HTTP - Python Speak",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        750,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{$json}}"
+      },
+      "id": "Respond_OK",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        120
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook - Incoming Comment": {
+      "main": [
+        [
+          {
+            "node": "Normalize + Basic Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize + Basic Filter": {
+      "main": [
+        [
+          {
+            "node": "Skip?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip?": {
+      "main": [
+        [
+          {
+            "node": "Respond Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP - Python Speak",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - Python Speak": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "skeleton"
+}

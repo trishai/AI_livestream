@@ -1,0 +1,175 @@
+import json, pathlib, zipfile, os, textwrap
+out_dir = pathlib.Path('n8n-ai-livestream-full-flow')
+if out_dir.exists():
+    import shutil; shutil.rmtree(out_dir)
+out_dir.mkdir()
+
+workflow = {
+  "name": "AI Livestream Hybrid - Full LLM Flow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-livestream-comment",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook_incoming_comment",
+      "name": "Webhook - Incoming Comment",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\n\nconst comment = String(body.comment || body.text || body.message || '').trim();\nconst sourceUser = String(body.user || body.source_user || body.username || 'anonymous').trim();\nconst requestId = body.request_id || crypto.randomUUID();\n\nif (!comment) {\n  return [{\n    json: {\n      skip: true,\n      reason: 'empty_comment',\n      request_id: requestId,\n      comment: '',\n      source_user: sourceUser\n    }\n  }];\n}\n\nconst spamPatterns = [\n  /https?:\\/\\//i,\n  /t\.me\\//i,\n  /telegram/i,\n  /casino/i,\n  /bet/i,\n  /crypto/i\n];\n\nconst isSpam = spamPatterns.some(r => r.test(comment));\n\nreturn [{\n  json: {\n    skip: isSpam,\n    reason: isSpam ? 'spam_pattern' : '',\n    comment,\n    source_user: sourceUser,\n    request_id: requestId\n  }\n}];"
+      },
+      "id": "normalize_basic_filter",
+      "name": "Normalize + Basic Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [260, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {"caseSensitive": True, "leftValue": "", "typeValidation": "strict"},
+          "conditions": [
+            {
+              "id": "skip_true",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": True,
+              "operator": {"type": "boolean", "operation": "equals"}
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if_skip",
+      "name": "Skip?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [520, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'skipped', reason: $json.reason, request_id: $json.request_id } }}",
+        "options": {}
+      },
+      "id": "respond_skipped",
+      "name": "Respond Skipped",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [780, -160]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AZURE_OPENAI_ENDPOINT + '/openai/deployments/' + $env.AZURE_OPENAI_DEPLOYMENT + '/chat/completions?api-version=' + ($env.AZURE_OPENAI_API_VERSION || '2024-02-15-preview') }}",
+        "sendHeaders": True,
+        "headerParameters": {
+          "parameters": [
+            {"name": "api-key", "value": "={{ $env.AZURE_OPENAI_API_KEY }}"},
+            {"name": "Content-Type", "value": "application/json"}
+          ]
+        },
+        "sendBody": True,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  temperature: 0.2,\n  max_tokens: 220,\n  response_format: { type: 'json_object' },\n  messages: [\n    {\n      role: 'system',\n      content: 'Bạn là AI livestream seller nói tiếng Việt. Chỉ trả về JSON hợp lệ, không markdown, không giải thích. Schema bắt buộc: {\"reply\": string, \"emotion\": \"neutral|happy|excited|sad|angry\", \"action\": \"answer|sell|ignore|fallback\"}. Reply ngắn tối đa 2 câu. Nếu comment spam hoặc không liên quan thì action=ignore. Nếu hỏi giá/ship/bảo hành/tồn kho thì trả lời thân thiện và action=sell. Không bịa giá nếu chưa có thông tin.'\n    },\n    {\n      role: 'user',\n      content: 'Viewer comment: ' + $json.comment\n    }\n  ]\n} }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "azure_openai_llm",
+      "name": "LLM - Azure OpenAI JSON",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [780, 120]
+    },
+    {
+      "parameters": {
+        "jsCode": "// This node parses Azure OpenAI chat completion output safely.\n// It also preserves original comment/source_user/request_id from the Normalize node.\n\nconst normalize = $('Normalize + Basic Filter').first().json;\n\nfunction fallback(reason) {\n  return [{\n    json: {\n      reply: 'Mình chưa hiểu rõ câu hỏi, bạn nói lại giúp mình nha!',\n      emotion: 'neutral',\n      action: 'fallback',\n      source_user: normalize.source_user,\n      comment: normalize.comment,\n      request_id: normalize.request_id,\n      llm_parse_ok: false,\n      llm_parse_reason: reason\n    }\n  }];\n}\n\nlet raw = '';\ntry {\n  raw = $json.choices?.[0]?.message?.content ?? '';\n} catch (e) {\n  return fallback('missing_choices_message_content');\n}\n\nif (typeof raw !== 'string' || !raw.trim()) {\n  return fallback('empty_llm_content');\n}\n\nraw = raw.trim();\n\n// Remove common markdown fences if model ignores instruction.\nraw = raw.replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```$/i, '').trim();\n\nlet data;\ntry {\n  data = JSON.parse(raw);\n} catch (e1) {\n  // Handle double-encoded JSON string: \"{\\\"reply\\\":...}\"\n  try {\n    data = JSON.parse(JSON.parse(raw));\n  } catch (e2) {\n    return fallback('json_parse_failed: ' + e2.message);\n  }\n}\n\nconst allowedEmotions = new Set(['neutral', 'happy', 'excited', 'sad', 'angry']);\nconst allowedActions = new Set(['answer', 'sell', 'ignore', 'fallback']);\n\nlet reply = String(data.reply || '').trim();\nlet emotion = String(data.emotion || 'neutral').trim().toLowerCase();\nlet action = String(data.action || 'fallback').trim().toLowerCase();\n\nif (!reply && action !== 'ignore') {\n  reply = 'Mình chưa hiểu rõ câu hỏi, bạn nói lại giúp mình nha!';\n  action = 'fallback';\n}\n\nif (!allowedEmotions.has(emotion)) emotion = 'neutral';\nif (!allowedActions.has(action)) action = 'fallback';\n\n// Safety clamp for TTS length.\nif (reply.length > 500) reply = reply.slice(0, 497) + '...';\n\nreturn [{\n  json: {\n    reply,\n    emotion,\n    action,\n    source_user: normalize.source_user,\n    comment: normalize.comment,\n    request_id: normalize.request_id,\n    llm_parse_ok: true\n  }\n}];"
+      },
+      "id": "parse_llm_json_safe",
+      "name": "Parse LLM JSON Safe",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1040, 120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AI_LIVESTREAM_PYTHON_URL || 'http://127.0.0.1:8088/speak' }}",
+        "sendHeaders": True,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Content-Type", "value": "application/json; charset=utf-8"}
+          ]
+        },
+        "sendBody": True,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  reply: $json.reply,\n  emotion: $json.emotion,\n  action: $json.action,\n  source_user: $json.source_user,\n  comment: $json.comment,\n  request_id: $json.request_id\n} }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "http_python_speak",
+      "name": "HTTP - Python /speak",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1300, 120]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "respond_ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1560, 120]
+    }
+  ],
+  "connections": {
+    "Webhook - Incoming Comment": {"main": [[{"node": "Normalize + Basic Filter", "type": "main", "index": 0}]]},
+    "Normalize + Basic Filter": {"main": [[{"node": "Skip?", "type": "main", "index": 0}]]},
+    "Skip?": {"main": [[{"node": "Respond Skipped", "type": "main", "index": 0}], [{"node": "LLM - Azure OpenAI JSON", "type": "main", "index": 0}]]},
+    "LLM - Azure OpenAI JSON": {"main": [[{"node": "Parse LLM JSON Safe", "type": "main", "index": 0}]]},
+    "Parse LLM JSON Safe": {"main": [[{"node": "HTTP - Python /speak", "type": "main", "index": 0}]]},
+    "HTTP - Python /speak": {"main": [[{"node": "Respond OK", "type": "main", "index": 0}]]}
+  },
+  "pinData": {},
+  "settings": {"executionOrder": "v1"},
+  "staticData": None,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2026-06-20T03:40:00.000Z",
+  "versionId": "full-llm-flow-v1",
+  "meta": {"templateCredsSetupCompleted": False},
+  "id": "ai-livestream-full-llm-flow",
+  "active": False
+}
+
+workflow_path = out_dir / 'workflow_ai_livestream_full_llm_azure.json'
+workflow_path.write_text(json.dumps(workflow, indent=2, ensure_ascii=False), encoding='utf-8')
+
+readme = r'''# n8n AI Livestream Full LLM Flow
+
+This workflow adds the LLM step between comment normalization and your Python `/speak` service.
+
+## Flow
+
+```text
+Webhook - Incoming Comment
+  ↓
+Normalize + Basic Filter
+  ↓
+Skip?
+  ├─ true  → Respond Skipped
+  └─ false → LLM - Azure OpenAI JSON
+              ↓
+            Parse LLM JSON Safe
+              ↓
+            HTTP - Python /speak
+              ↓
+            Respond OK

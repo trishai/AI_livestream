@@ -1,0 +1,484 @@
+{
+  "name": "AI Livestream Hybrid - Full LLM Flow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-livestream-comment-test",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "8e732d0c-2c33-482d-97b0-39f07c278ad2",
+      "name": "Webhook - Incoming Comment",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -672,
+        0
+      ],
+      "webhookId": "1245da47-f82d-4d57-bb49-20cc4d4ed02b"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\n\n// ✅ FIX encoding UTF-8 bị lỗi (quan trọng nhất)\nfunction fixEncoding(str) {\n  try {\n    return Buffer.from(str, \"latin1\").toString(\"utf8\");\n  } catch (e) {\n    return str;\n  }\n}\n\n// ✅ NORMALIZE TEXT (production-ready)\nfunction normalize(str) {\n  str = fixEncoding(str);\n\n  return (str || \"\")\n    .normalize(\"NFD\") // tách dấu\n    .replace(/[\\u0300-\\u036f]/g, \"\") // remove dấu\n    .replace(/đ/g, \"d\")\n    .replace(/Đ/g, \"D\")\n    .replace(/[^a-zA-Z0-9\\s]/g, \" \") // remove ký tự đặc biệt\n    .toLowerCase()\n    .replace(/\\s+/g, \" \") // clean multiple spaces\n    .trim();\n}\n\n// ✅ Lấy raw input\nconst rawComment = String(\n  body.comment || body.text || body.message || \"\"\n).trim();\n\nconst sourceUser = String(\n  body.user_id || body.source_user || body.username || \"anonymous\"\n).trim();\n\nconst requestId = body.request_id || Date.now().toString();\n\n// ✅ EMPTY CHECK\nif (!rawComment) {\n  return [\n    {\n      json: {\n        skip: true,\n        reason: \"empty_comment\",\n        comment_raw: \"\",\n        comment: \"\",\n        source_user: sourceUser,\n        request_id: requestId,\n      },\n    },\n  ];\n}\n\n// ✅ SPAM CHECK (dùng RAW để không miss link)\nconst spamPatterns = [\n  /https?:\\/\\//i,\n  /t\\.me\\//i,\n  /telegram/i,\n  /casino/i,\n  /bet/i,\n  /crypto/i,\n];\n\nconst isSpam = spamPatterns.some((r) => r.test(rawComment));\n\n// ✅ NORMALIZE SAU KHI CHECK SPAM\nconst normalizedComment = normalize(rawComment);\n\n// ✅ DEBUG (nên bật khi test)\nconsole.log({\n  raw: rawComment,\n  fixed: fixEncoding(rawComment),\n  normalized: normalizedComment,\n});\n\n// ✅ FINAL OUTPUT (LUÔN ARRAY)\nreturn [\n  {\n    json: {\n      skip: isSpam,\n      reason: isSpam ? \"spam_pattern\" : \"\",\n\n      // ✅ giữ cả raw + normalized\n      comment_raw: rawComment,\n      comment: normalizedComment,\n\n      source_user: sourceUser,\n      request_id: requestId,\n    },\n  },\n];"
+      },
+      "id": "239eab49-152d-4057-b046-53141ff62128",
+      "name": "Normalize + Basic Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -496,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "skip_true",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bfa209bd-5a8d-48b6-a7af-0b3ea975f720",
+      "name": "Skip?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -48,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'skipped', reason: $json.reason, request_id: $json.request_id } }}",
+        "options": {}
+      },
+      "id": "7da9d462-e2ac-4c06-a937-197b28b3b69c",
+      "name": "Respond Skipped",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        208,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://aoai-farm.bosch-temp.com/api/openai/deployments/gpt-5-nano-2025-08-07/chat/completions?api-version=2025-04-01-preview",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "=2893e3cbaf2d489b8d202f773d1e81ab"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n{\n  max_completion_tokens: 2000,\n  response_format: {\n    type: \"json_object\"\n  },\n  messages: [\n    {\n      role: \"system\",\n      content:\n        \"Bạn là AI livestream seller nói tiếng Việt. Bạn PHẢI trả về JSON hợp lệ. Không markdown. Không giải thích. JSON schema bắt buộc: {\\\"reply\\\":\\\"string\\\",\\\"emotion\\\":\\\"neutral|happy|excited|sad|angry\\\",\\\"action\\\":\\\"answer|sell|ignore|fallback\\\"}. Reply ngắn tối đa 2 câu. Nếu comment spam hoặc không liên quan thì action=\\\"ignore\\\". Nếu hỏi giá, ship, bảo hành, tồn kho thì trả lời thân thiện và action=\\\"sell\\\". Không bịa giá nếu chưa có thông tin.\"\n    },\n    {\n      role: \"user\",\n      content:\n        \"Trả về JSON cho comment sau: \" + $json.comment\n    }\n  ]\n}\n}}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "c1b5147b-1a3a-4a7a-88df-af387ac16fc1",
+      "name": "LLM - Azure OpenAI JSON",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        896,
+        -416
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const normalize = $('Normalize + Basic Filter').first().json;\n\nfunction fallback(reason, rawValue = null) {\n  return [{\n    json: {\n      reply: 'Mình chưa hiểu rõ câu hỏi, bạn nói lại giúp mình nha!',\n      emotion: 'neutral',\n      action: 'fallback',\n      source_user: normalize.source_user,\n      comment: normalize.comment,\n      request_id: normalize.request_id,\n      llm_parse_ok: false,\n      llm_parse_reason: reason,\n      llm_raw_debug: rawValue\n    }\n  }];\n}\n\nconst choice = $json.choices?.[0];\n\nif (!choice) {\n  return fallback('missing_choices', $json);\n}\n\nconst msg = choice.message;\n\nif (!msg) {\n  return fallback('missing_message', $json);\n}\n\nlet raw = '';\n\n// Case 1: GPT/chat completion classic content string\nif (typeof msg.content === 'string') {\n  raw = msg.content;\n}\n\n// Case 2: Some newer model wrappers return content array\nelse if (Array.isArray(msg.content)) {\n  raw = msg.content\n    .map(x => {\n      if (typeof x === 'string') return x;\n      if (typeof x?.text === 'string') return x.text;\n      if (typeof x?.content === 'string') return x.content;\n      return '';\n    })\n    .join('');\n}\n\n// Case 3: Some endpoint wrappers expose output_text\nelse if (typeof $json.output_text === 'string') {\n  raw = $json.output_text;\n}\n\nelse {\n  return fallback('unknown_content_format', msg);\n}\n\nraw = String(raw || '').trim();\n\nif (!raw) {\n  return fallback('empty_llm_content', {\n    finish_reason: choice.finish_reason,\n    usage: $json.usage,\n    message: msg\n  });\n}\n\n// Remove markdown fences if model ignores instruction\nraw = raw\n  .replace(/^```json\\s*/i, '')\n  .replace(/^```\\s*/i, '')\n  .replace(/```$/i, '')\n  .trim();\n\nlet data;\n\ntry {\n  data = JSON.parse(raw);\n} catch (e1) {\n  try {\n    data = JSON.parse(JSON.parse(raw));\n  } catch (e2) {\n    return fallback('json_parse_failed: ' + e2.message, raw);\n  }\n}\n\nconst allowedEmotions = new Set([\n  'neutral',\n  'happy',\n  'excited',\n  'sad',\n  'angry'\n]);\n\nconst allowedActions = new Set([\n  'answer',\n  'sell',\n  'ignore',\n  'fallback'\n]);\n\nlet reply = String(data.reply || '').trim();\nlet emotion = String(data.emotion || 'neutral').trim().toLowerCase();\nlet action = String(data.action || 'fallback').trim().toLowerCase();\n\nif (!allowedEmotions.has(emotion)) {\n  emotion = 'neutral';\n}\n\nif (!allowedActions.has(action)) {\n  action = 'fallback';\n}\n\nif (!reply && action !== 'ignore') {\n  reply = 'Mình chưa hiểu rõ câu hỏi, bạn nói lại giúp mình nha!';\n  action = 'fallback';\n}\n\nif (reply.length > 500) {\n  reply = reply.slice(0, 497) + '...';\n}\n\nreturn [{\n  json: {\n    reply,\n    emotion,\n    action,\n    source_user: normalize.source_user,\n    comment: normalize.comment,\n    request_id: normalize.request_id,\n    llm_parse_ok: true\n  }\n}];"
+      },
+      "id": "1ff44a47-2893-4621-b660-f8c74124ec83",
+      "name": "Parse LLM JSON Safe",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        176,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://127.0.0.1:8088/speak",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json; charset=utf-8"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"reply\": \"{{ $json.reply }}\",\n  \"emotion\": \"{{ $json.emotion }}\",\n  \"action\": \"{{ $json.action }}\",\n  \"source_user\": \"{{ $json.source_user }}\",\n  \"comment\": \"{{ $json.comment }}\"\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "341612ae-5859-4dde-8707-f836f4833915",
+      "name": "HTTP - Python /speak",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        368,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "3f4a6216-772d-4b0f-a2e8-e2af2e0648e8",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        816,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nconst userId = input.source_user || input.user || \"anonymous\";\n\n// ✅ đúng API static data của n8n Code node\nconst store = $getWorkflowStaticData(\"global\");\n\n// tạo key riêng cho memory\nconst memoryKey = `memory_${userId}`;\n\n// lấy memory cũ\nconst memory = store[memoryKey] || [];\n\nreturn [\n  {\n    json: {\n      ...input,\n      user_id: userId,\n      history: memory.join(\"\\n\")\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        224
+      ],
+      "id": "a3894df4-2bd5-491d-b881-84b974f3a07e",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://aoai-farm.bosch-temp.com/api/openai/deployments/gpt-5-nano-2025-08-07/chat/completions?api-version=2025-04-01-preview",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "=2893e3cbaf2d489b8d202f773d1e81ab"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n{\n  max_completion_tokens: 2000,\n  response_format: { type: \"json_object\" },\n\n  messages: [\n    {\n      role: \"system\",\n      content: `\nYou MUST output valid JSON ONLY. No markdown.\n\nYou are an AI livestream seller for DR Natro products.\n\nSTRICT RULES:\n- ONLY talk about DR Natro cleaning products.\n- IGNORE user language. ALWAYS respond in Vietnamese.\n- If product info is provided -> MUST use it.\n- Reply under 50 words (1-2 sentences).\n- No line breaks.\n\nJSON format:\n{\"reply\":\"string\",\"emotion\":\"neutral|happy|excited\",\"action\":\"answer|sell|fallback\"}\n`\n    },\n\n    // ✅ Inject product vào đây\n    {\n      role: \"system\",\n      content: `\nProduct info:\nName: ${$json.product?.name || \"unknown\"}\nPrice: ${$json.product?.price || \"unknown\"}\nDescription: ${$json.product?.desc || \"unknown\"}\nCategory: ${$json.detected_category || \"unknown\"}\n`\n    },\n\n    {\n      role: \"user\",\n      content: $json.comment\n    }\n  ]\n}\n}}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "a5b1fdad-6860-4a3d-a6b1-4cd25e96357f",
+      "name": "LLM - Azure OpenAI JSON1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        352,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nconst userId = input.source_user || input.user_id || input.user || \"anonymous\";\n\n// ✅ FIX: lấy reply cho chắc chắn\nconst reply = $node[\"Parse LLM JSON Safe\"].json.reply || \"\";\n\nconst store = $getWorkflowStaticData(\"global\");\n\nconst memoryKey = `memory_${userId}`;\n\nlet memory = store[memoryKey] || [];\n\n// Lưu lượt hiện tại\nmemory.push(\"User: \" + (input.comment || \"\"));\nmemory.push(\"Bot: \" + reply);\n\n// Giữ 5 lượt gần nhất = 10 dòng User/Bot\nmemory = memory.slice(-10);\n\n// Save lại memory\nstore[memoryKey] = memory;\n\nreturn [\n  {\n    json: {\n      ...input,\n      reply: reply,\n      memory_saved: true,\n      memory_turns: memory.length\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        368
+      ],
+      "id": "a1f50dd2-4ffb-44c0-969d-1d6933008903",
+      "name": "Code in JavaScript2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json);\nconst base = $node[\"Normalize + Basic Filter\"].json;\n\n// =====================\n// NORMALIZE\n// =====================\nfunction removeVietnameseTones(str) {\n  return (str || \"\")\n    .normalize(\"NFD\")\n    .replace(/[\\u0300-\\u036f]/g, \"\")\n    .replace(/đ/g, \"d\").replace(/Đ/g, \"D\");\n}\n\nfunction normalize(str) {\n  return removeVietnameseTones(str)\n    .toLowerCase()\n    .trim();\n}\n\nconst comment = normalize(base.comment || \"\");\n\n// =====================\n// ✅ PURCHASE INTENT\n// =====================\nconst purchaseKeywords = [\n  \"da mua\",\n  \"da chot\",\n  \"chot don\",\n  \"chot nhe\",\n  \"ok chot\",\n  \"mua roi\",\n  \"dat hang roi\",\n  \"toi lay\",\n  \"lay 1\",\n  \"lay 2\",\n  \"chot 1\",\n  \"chot 2\"\n];\n\nfunction detectPurchaseIntent(comment) {\n  for (const k of purchaseKeywords) {\n    if (comment.includes(normalize(k))) {\n      return true;\n    }\n  }\n  return false;\n}\n\nconst isPurchaseConfirmed = detectPurchaseIntent(comment);\n\n// =====================\n// ✅ CATEGORY\n// =====================\nconst categoryKeywords = {\n  \"lau san\": [\"lau san\", \"lau nha\", \"floor\"],\n  \"bep\": [\"bep\", \"dau mo\"],\n  \"toilet\": [\"toilet\", \"wc\", \"nha ve sinh\", \"nha tam\"],\n  \"khu mui\": [\"mui hoi\", \"khu mui\"]\n};\n\nfunction detectCategory(comment) {\n  for (const [key, keywords] of Object.entries(categoryKeywords)) {\n    for (const k of keywords) {\n      if (comment.includes(normalize(k))) {\n        return key;\n      }\n    }\n  }\n  return null;\n}\n\nconst detectedCategory = detectCategory(comment);\n\n// =====================\n// ✅ EXTRACT QUANTITY\n// =====================\nconst quantityMatch = comment.match(/\\b(\\d+)\\b/);\nconst quantity = quantityMatch ? parseInt(quantityMatch[1]) : null;\n\n// =====================\n// ✅ SCORING\n// =====================\nfunction scoreProduct(name, comment, category) {\n  let score = 0;\n  if (!name) return 0;\n\n  const n = normalize(name);\n\n  // ✅ match category\n  if (category && n.includes(category)) {\n    score += 5;\n  }\n\n  // ✅ exact name match\n  if (comment.includes(n)) {\n    score += 3;\n  }\n\n  // ✅ partial match\n  const words = n.split(\" \");\n  for (const w of words) {\n    if (w.length > 2 && comment.includes(w)) {\n      score += 1;\n    }\n  }\n\n  return score;\n}\n\n// =====================\n// ✅ MATCH PRODUCT (skip nếu đã chốt)\n// =====================\nlet productVerified = null;\nlet bestScore = 0;\n\nif (!isPurchaseConfirmed) {\n\n  let bestMatch = null;\n\n  for (const r of rows) {\n    const score = scoreProduct(r.Name, comment, detectedCategory);\n\n    if (score > bestScore) {\n      bestScore = score;\n      bestMatch = r;\n    }\n  }\n\n  if (bestMatch && bestScore > 0) {\n    productVerified = {\n      name: bestMatch.Name,\n      price: bestMatch.Price,\n      desc: (bestMatch.Description || \"\").slice(0, 120)\n    };\n  }\n}\n\n// =====================\n// ✅ OUTPUT\n// =====================\nreturn [{\n  json: {\n    ...base,\n    product: productVerified,\n    detected_category: detectedCategory,\n    match_score: bestScore,\n    is_purchase_intent: isPurchaseConfirmed,\n    quantity: quantity\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -592,
+        432
+      ],
+      "id": "1b4600b0-f088-44df-a6e0-d64850bb194d",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "fileSelector": "C:\\Users\\HHA5HC\\.n8n-files\\drnatro_full_products.xlsx",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -656,
+        208
+      ],
+      "id": "247242b6-a564-4944-993b-6d5def5a4536",
+      "name": "Read/Write Files from Disk"
+    },
+    {
+      "parameters": {
+        "fileFormat": "xlsx",
+        "options": {}
+      },
+      "name": "Parse Excel1",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        208
+      ],
+      "id": "778b3793-f213-4b22-a555-e65ec35c18b9"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://aoai-farm.bosch-temp.com/api/openai/deployments/gpt-5-nano-2025-08-07/chat/completions?api-version=2025-04-01-preview",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n{\n  max_completion_tokens: 2000,\n  response_format: { type: \"json_object\" },\n  messages: [\n    {\n      role: \"system\",\n      content:\n        \"You MUST output valid JSON. Bạn là AI livestream seller. Trả về JSON hợp lệ duy nhất. Không markdown, không giải thích. JSON schema: {\\\"reply\\\":\\\"string\\\",\\\"emotion\\\":\\\"neutral|happy|excited|sad|angry\\\",\\\"action\\\":\\\"answer|sell|ignore|fallback\\\"}.\"\n    },\n    {\n      role: \"system\",\n      content:\n        \"This conversation context must be used to answer in JSON.\\n\" + ($json.history || \"No history\")\n    },\n    {\n      role: \"user\",\n      content:\n        \"Return JSON for this comment: \" + $json.comment\n    }\n  ]\n}\n}}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "bb6332a6-d931-49d6-8b9a-7e7014a9a7c3",
+      "name": "LLM - Azure OpenAI JSON2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1488,
+        -352
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Get Comment",
+        "height": 752,
+        "width": 736
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -848,
+        -144
+      ],
+      "id": "92e8da29-6c56-484d-a016-48f854f36fd3",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "AI PROCESS",
+        "height": 480,
+        "width": 448
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        112,
+        160
+      ],
+      "id": "370872e5-309d-4e7a-895a-96a16fa91dd5",
+      "name": "Sticky Note1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Incoming Comment": {
+      "main": [
+        [
+          {
+            "node": "Normalize + Basic Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize + Basic Filter": {
+      "main": [
+        [
+          {
+            "node": "Read/Write Files from Disk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip?": {
+      "main": [
+        [
+          {
+            "node": "Respond Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM - Azure OpenAI JSON": {
+      "main": [
+        []
+      ]
+    },
+    "Parse LLM JSON Safe": {
+      "main": [
+        [
+          {
+            "node": "HTTP - Python /speak",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - Python /speak": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "LLM - Azure OpenAI JSON1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM - Azure OpenAI JSON1": {
+      "main": [
+        [
+          {
+            "node": "Parse LLM JSON Safe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript2": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Skip?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read/Write Files from Disk": {
+      "main": [
+        [
+          {
+            "node": "Parse Excel1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Excel1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "fc248301-ca1b-4eeb-837f-02630da61dca",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "268b520f6b1c59982ffd7885726f62e2af1c8da5ce754596ef05e8376cba1177"
+  },
+  "id": "gQRWwlAdyue4kPsd",
+  "tags": []
+}
